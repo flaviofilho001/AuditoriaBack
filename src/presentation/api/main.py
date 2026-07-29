@@ -1,6 +1,10 @@
 import os
+import shutil
+import tempfile
+import zipfile
+import subprocess
 import structlog
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
@@ -9,6 +13,7 @@ from src import __version__
 from src.domain.models.llm_config import LLMConfig, LLMProviderType
 from src.infrastructure.ai.llm_factory import LLMFactory
 from src.infrastructure.knowledge_base.grc_repository import GRCKnowledgeRepository
+from src.application.use_cases.audit_use_case import AuditComplianceUseCase
 
 logger = structlog.get_logger()
 
@@ -27,14 +32,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Instância global do repositório GRC
+# Instâncias globais
 grc_repo = GRCKnowledgeRepository()
+audit_use_case = AuditComplianceUseCase(grc_repo)
+
+
+class GitScanRequest(BaseModel):
+    git_url: str
+    branch: Optional[str] = "main"
+    access_token: Optional[str] = None
+    provider: LLMProviderType = LLMProviderType.GEMINI
+    api_key: Optional[str] = None
+    ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "gemma:2b"
+    use_ai: bool = True
 
 
 class LLMTestRequest(BaseModel):
     provider: LLMProviderType = LLMProviderType.GEMINI
     api_key: Optional[str] = None
-    gemini_model: str = "gemini-3.5-flash"  # Exclusivo gemini-3.5-flash
+    gemini_model: str = "gemini-3.5-flash"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "gemma:2b"
     prompt: str = "Resuma a importância do Artigo 46 da LGPD em 2 frases."
@@ -52,15 +69,11 @@ async def health_check():
 
 @app.get("/api/v1/grc/docs", tags=["GRC Knowledge Base"])
 async def list_grc_docs():
-    """Lista todos os documentos de GRC carregados na base de conhecimento."""
-    return {
-        "documents": grc_repo.list_available_docs()
-    }
+    return {"documents": grc_repo.list_available_docs()}
 
 
 @app.get("/api/v1/grc/docs/{doc_name}", tags=["GRC Knowledge Base"])
 async def get_grc_doc(doc_name: str):
-    """Obtém o conteúdo completo de um documento GRC (ex: LGPD, OWASP_TOP_10_2021)."""
     content = grc_repo.get_document(doc_name)
     if not content:
         raise HTTPException(
@@ -70,11 +83,116 @@ async def get_grc_doc(doc_name: str):
     return {"document": doc_name, "content": content}
 
 
+@app.post("/api/v1/scan/upload-zip", tags=["Audit Scanner"])
+async def scan_upload_zip(
+    file: UploadFile = File(...),
+    provider: LLMProviderType = Form(LLMProviderType.GEMINI),
+    api_key: Optional[str] = Form(None),
+    ollama_base_url: str = Form("http://localhost:11434"),
+    ollama_model: str = Form("gemma:2b"),
+    use_ai: bool = Form(True)
+):
+    """Recebe um arquivo .zip contendo o código fonte de uma API (C#, Go, Python, Java, JS/TS), descompacta em sandbox e executa a auditoria."""
+    if not file.filename.endswith(".zip"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Por favor envie um arquivo com extensão .zip"
+        )
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        zip_path = os.path.join(temp_dir, "uploaded_project.zip")
+        extract_path = os.path.join(temp_dir, "extracted")
+        os.makedirs(extract_path, exist_ok=True)
+
+        # Salva o arquivo ZIP temporário
+        with open(zip_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # Descompacta o arquivo
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zip_ref:
+                zip_ref.extractall(extract_path)
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Não foi possível descompactar o arquivo ZIP: {str(e)}"
+            )
+
+        # Configuração da LLM
+        resolved_key = api_key or os.getenv("GEMINI_API_KEY")
+        llm_config = LLMConfig(
+            provider=provider,
+            api_key=resolved_key,
+            gemini_model="gemini-3.5-flash",
+            ollama_base_url=ollama_base_url,
+            ollama_model=ollama_model
+        )
+
+        result = await audit_use_case.execute_audit(
+            target_dir=extract_path,
+            llm_config=llm_config,
+            use_ai_enhancement=use_ai
+        )
+
+        return result
+
+
+@app.post("/api/v1/scan/git-url", tags=["Audit Scanner"])
+async def scan_git_url(request: GitScanRequest):
+    """Clona um repositório Git público ou privado via URL e executa a auditoria de conformidade GRC."""
+    git_url = request.git_url.strip()
+    if request.access_token and "github.com" in git_url and "@" not in git_url:
+        # Injeta token de acesso para repositórios privados
+        git_url = git_url.replace("https://", f"https://x-access-token:{request.access_token}@")
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        clone_path = os.path.join(temp_dir, "repo")
+
+        try:
+            cmd = ["git", "clone", "--depth", "1"]
+            if request.branch:
+                cmd.extend(["-b", request.branch])
+            cmd.extend([git_url, clone_path])
+
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if proc.returncode != 0:
+                logger.error("git_clone_failed", stderr=proc.stderr)
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Falha ao clonar o repositório Git: {proc.stderr[:200]}"
+                )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(
+                status_code=status.HTTP_408_REQUEST_TIMEOUT,
+                detail="Tempo limite excedido ao clonar o repositório Git."
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Erro ao clonar repositório: {str(e)}"
+            )
+
+        resolved_key = request.api_key or os.getenv("GEMINI_API_KEY")
+        llm_config = LLMConfig(
+            provider=request.provider,
+            api_key=resolved_key,
+            gemini_model="gemini-3.5-flash",
+            ollama_base_url=request.ollama_base_url,
+            ollama_model=request.ollama_model
+        )
+
+        result = await audit_use_case.execute_audit(
+            target_dir=clone_path,
+            llm_config=llm_config,
+            use_ai_enhancement=request.use_ai
+        )
+
+        return result
+
+
 @app.post("/api/v1/llm/test", tags=["LLM Provider"])
 async def test_llm_provider(request: LLMTestRequest):
-    """Testa a conexão e resposta do provedor de LLM (Gemini gemini-3.5-flash com Rate Limiter de 14 RPM ou Ollama Local)."""
     api_key = request.api_key or os.getenv("GEMINI_API_KEY")
-    
     config = LLMConfig(
         provider=request.provider,
         api_key=api_key,
@@ -88,11 +206,7 @@ async def test_llm_provider(request: LLMTestRequest):
         health = await provider_inst.check_health()
         
         if health.get("status") in ["unconfigured", "unreachable"]:
-            return {
-                "success": False,
-                "health": health,
-                "response": None
-            }
+            return {"success": False, "health": health, "response": None}
 
         system_instruction = "Você é um auditor especialista em Segurança Cibernética, OWASP Top 10 e LGPD."
         response_text = await provider_inst.generate_completion(
@@ -100,11 +214,7 @@ async def test_llm_provider(request: LLMTestRequest):
             system_instruction=system_instruction
         )
 
-        return {
-            "success": True,
-            "health": health,
-            "response": response_text
-        }
+        return {"success": True, "health": health, "response": response_text}
     except Exception as e:
         logger.error("llm_test_endpoint_failed", error=str(e))
         raise HTTPException(
