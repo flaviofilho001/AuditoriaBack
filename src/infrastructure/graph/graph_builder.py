@@ -75,3 +75,10 @@ class NetworkXGraphBuilder:
             "endpoint": endpoint_data,
             "connected_elements": connected_nodes
         }
+
+    def export_to_graphml(self) -> str:
+        """Exporta o grafo construído para o formato XML GraphML (compatível com visualizadores GraphRAG)."""
+        if self.graph.number_of_nodes() == 0:
+            return ""
+        return "\n".join(nx.generate_graphml(self.graph))
+

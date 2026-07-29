@@ -64,7 +64,8 @@ class AuditComplianceUseCase:
                 "ai_executive_summary": ai_summary
             },
             "findings": [f.model_dump() for f in findings],
-            "files_scanned": files_scanned
+            "files_scanned": files_scanned,
+            "graphml_data": self.graph_builder.export_to_graphml()
         }
 
     async def _run_ai_analysis(

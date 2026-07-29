@@ -209,11 +209,88 @@ async def export_report(request: ReportExportRequest):
     elif fmt == "sarif":
         content = SarifReporter.generate_sarif(scan_result)
         return content
+    elif fmt == "graphml":
+        graphml_content = scan_result.get("graphml_data", "")
+        if not graphml_content:
+            raise HTTPException(status_code=400, detail="Nenhum dado GraphML encontrado no resultado.")
+        return Response(content=graphml_content, media_type="application/xml")
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Formato de exportação '{fmt}' não suportado. Use 'html', 'markdown' ou 'sarif'."
+            detail=f"Formato de exportação '{fmt}' não suportado. Use 'html', 'markdown', 'sarif' ou 'graphml'."
         )
+
+# ==============================================================================
+# FASE 4: GitHub PR Webhook
+# ==============================================================================
+from fastapi import BackgroundTasks, Request
+
+async def process_github_pr_webhook(payload: Dict[str, Any]):
+    """Processa o PR em background para não dar timeout no GitHub"""
+    try:
+        action = payload.get("action")
+        if action not in ["opened", "synchronize", "reopened"]:
+            return
+            
+        pr = payload.get("pull_request", {})
+        repo = payload.get("repository", {})
+        
+        pr_number = pr.get("number")
+        repo_full_name = repo.get("full_name")
+        branch_name = pr.get("head", {}).get("ref", "main")
+        clone_url = repo.get("clone_url")
+        comments_url = pr.get("comments_url")
+        
+        if not clone_url or not comments_url:
+            return
+
+        logger.info("webhook_pr_started", repo=repo_full_name, pr=pr_number)
+
+        # 1. Executa Auditoria via Clone
+        llm_config = LLMConfig(provider=LLMProviderType.GEMINI, api_key=os.getenv("GEMINI_API_KEY"), gemini_model="gemini-3.5-flash")
+        
+        with tempfile.TemporaryDirectory() as temp_dir:
+            clone_path = os.path.join(temp_dir, "repo")
+            cmd = ["git", "clone", "--depth", "1", "-b", branch_name, clone_url, clone_path]
+            subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            
+            result = await audit_use_case.execute_audit(target_dir=clone_path, llm_config=llm_config)
+            
+        # 2. Gera Comentário PR Markdown
+        md_report = MarkdownPRReporter.generate_markdown(result)
+        
+        # 3. Posta no GitHub (Exige GITHUB_TOKEN configurado no Railway)
+        github_token = os.getenv("GITHUB_TOKEN")
+        if not github_token:
+            logger.error("webhook_pr_failed", reason="GITHUB_TOKEN não configurado no servidor")
+            return
+            
+        headers = {
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github.v3+json"
+        }
+        
+        async with httpx.AsyncClient() as client:
+            res = await client.post(comments_url, json={"body": md_report}, headers=headers)
+            res.raise_for_status()
+            
+        logger.info("webhook_pr_comment_posted", repo=repo_full_name, pr=pr_number)
+        
+    except Exception as e:
+        logger.error("webhook_pr_error", error=str(e))
+
+@app.post("/api/v1/webhooks/github", tags=["Webhooks"])
+async def github_webhook(request: Request, background_tasks: BackgroundTasks):
+    """
+    Endpoint para receber eventos de Webhook do GitHub App (Fase 4).
+    Requer configuração do webhook apontando para cá no repositório.
+    """
+    event = request.headers.get("X-GitHub-Event")
+    if event == "pull_request":
+        payload = await request.json()
+        background_tasks.add_task(process_github_pr_webhook, payload)
+        return {"status": "accepted", "message": "Pull request audit started in background"}
+    return {"status": "ignored", "event": event}
 
 
 @app.post("/api/v1/llm/test", tags=["LLM Provider"])
