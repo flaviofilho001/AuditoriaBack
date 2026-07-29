@@ -9,8 +9,8 @@ logger = structlog.get_logger()
 
 class OllamaProvider(ILLMProvider):
     """
-    Provedor Ollama Local.
-    Permite usar qualquer modelo baixado localmente (ex: gemma:2b, gemma:12b, gemma:26b, qwen3.5:2b, llama3.2).
+    Provedor Ollama.
+    Suporta servidores Ollama locais ou expostos via Ngrok / Cloudflare Tunnel.
     """
 
     def __init__(self, config: LLMConfig):
@@ -47,9 +47,14 @@ class OllamaProvider(ILLMProvider):
                 return data.get("response", "")
             except httpx.ConnectError:
                 logger.error("ollama_connection_failed", base_url=self.base_url)
-                raise RuntimeError(
-                    f"Não foi possível conectar ao Ollama em {self.base_url}. Certifique-se de que o Ollama está rodando ('ollama serve')."
-                )
+                if "localhost" in self.base_url or "127.0.0.1" in self.base_url:
+                    raise RuntimeError(
+                        f"Não foi possível conectar ao Ollama em {self.base_url}. Como o backend está rodando no Railway (Nuvem), para conectar ao Ollama da sua máquina exponha a porta com Ngrok ('ngrok http 11434') e insira a URL pública no campo 'Ollama Base URL', ou use a chave do Google Gemini."
+                    )
+                else:
+                    raise RuntimeError(
+                        f"Não foi possível conectar ao servidor Ollama em {self.base_url}. Verifique se o endereço está correto e online."
+                    )
 
     async def check_health(self) -> Dict[str, Any]:
         url = f"{self.base_url}/api/tags"
@@ -74,6 +79,6 @@ class OllamaProvider(ILLMProvider):
                     "provider": "ollama",
                     "base_url": self.base_url,
                     "error": str(e),
-                    "message": "Ollama não está rodando ou inacessível."
+                    "message": "Ollama inacessível a partir do servidor em nuvem."
                 }
         return {"status": "unknown"}

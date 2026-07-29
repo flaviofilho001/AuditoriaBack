@@ -12,7 +12,7 @@ class LLMConfig(BaseModel):
     provider: LLMProviderType = LLMProviderType.GEMINI
     # Para Gemini:
     api_key: Optional[str] = None
-    gemini_model: str = "gemini-3.5-flash"  # Fixo no modelo gemini-3.5-flash
+    gemini_model: str = "gemini-1.5-flash"  # Modelo oficial estável
     max_requests_per_minute: int = 14  # Limite estrito de 14 RPM
     
     # Para Ollama:

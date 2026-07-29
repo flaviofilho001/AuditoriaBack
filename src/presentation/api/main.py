@@ -51,13 +51,13 @@ class GitScanRequest(BaseModel):
 
 class ReportExportRequest(BaseModel):
     scan_result: Dict[str, Any]
-    format: str = "html"  # 'html', 'markdown', ou 'sarif'
+    format: str = "html"
 
 
 class LLMTestRequest(BaseModel):
     provider: LLMProviderType = LLMProviderType.GEMINI
     api_key: Optional[str] = None
-    gemini_model: str = "gemini-3.5-flash"
+    gemini_model: str = "gemini-1.5-flash"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "gemma:2b"
     prompt: str = "Resuma a importância do Artigo 46 da LGPD em 2 frases."
@@ -125,7 +125,7 @@ async def scan_upload_zip(
         llm_config = LLMConfig(
             provider=provider,
             api_key=resolved_key,
-            gemini_model="gemini-3.5-flash",
+            gemini_model="gemini-1.5-flash",
             ollama_base_url=ollama_base_url,
             ollama_model=ollama_model
         )
@@ -176,7 +176,7 @@ async def scan_git_url(request: GitScanRequest):
         llm_config = LLMConfig(
             provider=request.provider,
             api_key=resolved_key,
-            gemini_model="gemini-3.5-flash",
+            gemini_model="gemini-1.5-flash",
             ollama_base_url=request.ollama_base_url,
             ollama_model=request.ollama_model
         )
@@ -192,7 +192,6 @@ async def scan_git_url(request: GitScanRequest):
 
 @app.post("/api/v1/report/export", tags=["Report Exporter"])
 async def export_report(request: ReportExportRequest):
-    """Exporta o resultado da auditoria nos formatos: 'html' (Executivo), 'markdown' (PR Bot) ou 'sarif' (GitHub Security)."""
     fmt = request.format.lower()
     scan_result = request.scan_result
 
@@ -218,7 +217,7 @@ async def test_llm_provider(request: LLMTestRequest):
     config = LLMConfig(
         provider=request.provider,
         api_key=api_key,
-        gemini_model="gemini-3.5-flash",
+        gemini_model="gemini-1.5-flash",
         ollama_base_url=request.ollama_base_url,
         ollama_model=request.ollama_model
     )

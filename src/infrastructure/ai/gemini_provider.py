@@ -12,13 +12,14 @@ logger = structlog.get_logger()
 class GeminiRateLimitedProvider(ILLMProvider):
     """
     Provedor Google Gemini com Rate Limiting Estrito (Máximo 14 requisições por minuto).
-    Força o uso exclusivo do modelo 'gemini-3.5-flash'.
+    Utiliza gemini-1.5-flash por padrão com suporte a modelos oficiais da Google AI.
     """
 
     def __init__(self, config: LLMConfig):
         self.config = config
         self.api_key = config.api_key
-        self.model = "gemini-3.5-flash"  # Exclusivo gemini-3.5-flash
+        # Se for especificado um modelo inválido, faz fallback para o modelo oficial 'gemini-1.5-flash'
+        self.model = config.gemini_model if config.gemini_model and "3.5" not in config.gemini_model else "gemini-1.5-flash"
         self.max_rpm = min(config.max_requests_per_minute, 14)  # Força máximo de 14 RPM
         self._request_timestamps: List[float] = []
         self._lock = asyncio.Lock()
@@ -26,12 +27,11 @@ class GeminiRateLimitedProvider(ILLMProvider):
     async def _enforce_rate_limit(self):
         async with self._lock:
             now = time.time()
-            # Filtra requisições que ocorreram nos últimos 60 segundos
             self._request_timestamps = [t for t in self._request_timestamps if now - t < 60.0]
 
             if len(self._request_timestamps) >= self.max_rpm:
                 oldest_in_window = self._request_timestamps[0]
-                wait_time = 60.0 - (now - oldest_in_window) + 0.5  # Margem de segurança de 0.5s
+                wait_time = 60.0 - (now - oldest_in_window) + 0.5
                 logger.info(
                     "gemini_rate_limit_throttling",
                     requests_in_window=len(self._request_timestamps),
@@ -39,10 +39,14 @@ class GeminiRateLimitedProvider(ILLMProvider):
                 )
                 await asyncio.sleep(max(wait_time, 0.1))
                 now = time.time()
-                # Atualiza novamente a lista
                 self._request_timestamps = [t for t in self._request_timestamps if now - t < 60.0]
 
             self._request_timestamps.append(now)
+
+    async def _make_api_call(self, model_name: str, payload: dict) -> httpx.Response:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.api_key}"
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            return await client.post(url, json=payload)
 
     async def generate_completion(
         self, 
@@ -50,12 +54,9 @@ class GeminiRateLimitedProvider(ILLMProvider):
         system_instruction: Optional[str] = None
     ) -> str:
         if not self.api_key:
-            raise ValueError("GEMINI_API_KEY não foi configurada.")
+            raise ValueError("GEMINI_API_KEY não foi configurada. Preencha a chave na interface ou configure a variável GEMINI_API_KEY no Railway.")
 
-        # Aguarda a janela de rate limit
         await self._enforce_rate_limit()
-
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
 
         contents = []
         if system_instruction:
@@ -81,22 +82,28 @@ class GeminiRateLimitedProvider(ILLMProvider):
             }
         }
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(url, json=payload)
-            if response.status_code != 200:
-                logger.error("gemini_api_error", status_code=response.status_code, response=response.text)
-                response.raise_for_status()
-            
-            data = response.json()
-            try:
-                candidates = data.get("candidates", [])
-                if not candidates:
-                    return ""
-                parts = candidates[0].get("content", {}).get("parts", [])
-                return "".join([part.get("text", "") for part in parts])
-            except Exception as e:
-                logger.error("gemini_parse_error", error=str(e), raw_response=data)
-                raise RuntimeError(f"Erro ao parsear resposta do Gemini: {e}")
+        # Tenta a chamada no modelo configurado
+        response = await self._make_api_call(self.model, payload)
+        
+        # Se retornar erro 503 ou 404 por nome de modelo inválido, tenta fallback para gemini-1.5-flash
+        if response.status_code in [404, 503] and self.model != "gemini-1.5-flash":
+            logger.warning("gemini_model_fallback_triggered", original_model=self.model, status_code=response.status_code)
+            response = await self._make_api_call("gemini-1.5-flash", payload)
+
+        if response.status_code != 200:
+            logger.error("gemini_api_error", status_code=response.status_code, response=response.text)
+            response.raise_for_status()
+        
+        data = response.json()
+        try:
+            candidates = data.get("candidates", [])
+            if not candidates:
+                return ""
+            parts = candidates[0].get("content", {}).get("parts", [])
+            return "".join([part.get("text", "") for part in parts])
+        except Exception as e:
+            logger.error("gemini_parse_error", error=str(e), raw_response=data)
+            raise RuntimeError(f"Erro ao parsear resposta do Gemini: {e}")
 
     async def check_health(self) -> Dict[str, Any]:
         if not self.api_key:
