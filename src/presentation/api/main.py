@@ -8,6 +8,7 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response, st
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
+import httpx
 
 from src import __version__
 from src.domain.models.llm_config import LLMConfig, LLMProviderType
@@ -57,10 +58,14 @@ class ReportExportRequest(BaseModel):
 class LLMTestRequest(BaseModel):
     provider: LLMProviderType = LLMProviderType.GEMINI
     api_key: Optional[str] = None
-    gemini_model: str = "gemini-1.5-flash"
+    gemini_model: str = "gemini-3.5-flash"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "gemma:2b"
     prompt: str = "Resuma a importância do Artigo 46 da LGPD em 2 frases."
+
+
+class OllamaModelsProxyRequest(BaseModel):
+    ollama_base_url: str
 
 
 @app.get("/health", tags=["Health"])
@@ -125,7 +130,7 @@ async def scan_upload_zip(
         llm_config = LLMConfig(
             provider=provider,
             api_key=resolved_key,
-            gemini_model="gemini-1.5-flash",
+            gemini_model="gemini-3.5-flash",
             ollama_base_url=ollama_base_url,
             ollama_model=ollama_model
         )
@@ -176,7 +181,7 @@ async def scan_git_url(request: GitScanRequest):
         llm_config = LLMConfig(
             provider=request.provider,
             api_key=resolved_key,
-            gemini_model="gemini-1.5-flash",
+            gemini_model="gemini-3.5-flash",
             ollama_base_url=request.ollama_base_url,
             ollama_model=request.ollama_model
         )
@@ -217,7 +222,7 @@ async def test_llm_provider(request: LLMTestRequest):
     config = LLMConfig(
         provider=request.provider,
         api_key=api_key,
-        gemini_model="gemini-1.5-flash",
+        gemini_model="gemini-3.5-flash",
         ollama_base_url=request.ollama_base_url,
         ollama_model=request.ollama_model
     )
@@ -242,6 +247,32 @@ async def test_llm_provider(request: LLMTestRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Falha ao comunicar com o provedor LLM ({request.provider}): {str(e)}"
         )
+
+
+@app.post("/api/v1/llm/ollama/models", tags=["LLM Provider Proxy"])
+async def list_ollama_models(request: OllamaModelsProxyRequest):
+    """
+    Endpoint Proxy para buscar modelos do Ollama.
+    Resolve problemas de CORS/Mixed Content permitindo que o Backend busque as tags e retorne ao Frontend.
+    """
+    url = f"{request.ollama_base_url.rstrip('/')}/api/tags"
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            res = await client.get(url)
+            res.raise_for_status()
+            data = res.json()
+            models = [m.get("name") for m in data.get("models", [])]
+            return {"success": True, "models": models}
+    except httpx.RequestError as e:
+        # Se for localhost e falhar, é porque está na nuvem e o Ollama não tá exposto pra internet via Ngrok
+        if "localhost" in request.ollama_base_url or "127.0.0.1" in request.ollama_base_url:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="O Backend está na Nuvem e tentou acessar seu localhost, mas não encontrou o Ollama. Se quiser usar o backend na nuvem, você precisa usar o Ngrok na sua máquina."
+            )
+        raise HTTPException(status_code=400, detail=f"Erro de conexão com Ollama: {str(e)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":
