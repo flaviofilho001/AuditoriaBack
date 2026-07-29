@@ -1,8 +1,16 @@
 import asyncio
 import time
 import structlog
-import httpx
 from typing import Dict, Any, Optional, List
+
+try:
+    from google import genai
+    from google.genai import types
+    GENAI_SDK_AVAILABLE = True
+except ImportError:
+    GENAI_SDK_AVAILABLE = False
+
+import httpx
 from src.application.interfaces.illm_provider import ILLMProvider
 from src.domain.models.llm_config import LLMConfig
 
@@ -11,16 +19,15 @@ logger = structlog.get_logger()
 
 class GeminiRateLimitedProvider(ILLMProvider):
     """
-    Provedor Google Gemini com Rate Limiting Estrito (Máximo 14 requisições por minuto).
-    Utiliza gemini-1.5-flash por padrão com suporte a modelos oficiais da Google AI.
+    Provedor Google Gemini com o SDK oficial 'google-genai' e modelo 'gemini-3.5-flash'.
+    Implementa Rate Limiting estrito de 14 RPM com throttling via asyncio.
     """
 
     def __init__(self, config: LLMConfig):
         self.config = config
         self.api_key = config.api_key
-        # Se for especificado um modelo inválido, faz fallback para o modelo oficial 'gemini-1.5-flash'
-        self.model = config.gemini_model if config.gemini_model and "3.5" not in config.gemini_model else "gemini-1.5-flash"
-        self.max_rpm = min(config.max_requests_per_minute, 14)  # Força máximo de 14 RPM
+        self.model = "gemini-3.5-flash"
+        self.max_rpm = min(config.max_requests_per_minute, 14)
         self._request_timestamps: List[float] = []
         self._lock = asyncio.Lock()
 
@@ -43,20 +50,60 @@ class GeminiRateLimitedProvider(ILLMProvider):
 
             self._request_timestamps.append(now)
 
-    async def _make_api_call(self, model_name: str, payload: dict) -> httpx.Response:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={self.api_key}"
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            return await client.post(url, json=payload)
-
     async def generate_completion(
         self, 
         prompt: str, 
         system_instruction: Optional[str] = None
     ) -> str:
         if not self.api_key:
-            raise ValueError("GEMINI_API_KEY não foi configurada. Preencha a chave na interface ou configure a variável GEMINI_API_KEY no Railway.")
+            raise ValueError(
+                "Chave de API do Gemini não configurada! Por favor insira a sua Gemini API Key na interface ou defina a variável GEMINI_API_KEY no Railway."
+            )
 
         await self._enforce_rate_limit()
+
+        # Executa a chamada do SDK google-genai de forma assíncrona
+        def _call_sdk():
+            client = genai.Client(api_key=self.api_key)
+            
+            # Tenta usar a nova API de interactions ou models.generate_content do SDK google-genai
+            if hasattr(client, "interactions"):
+                try:
+                    interaction = client.interactions.create(
+                        model=self.model,
+                        input=f"{f'System: {system_instruction}' if system_instruction else ''}\nUser: {prompt}"
+                    )
+                    return interaction.output_text
+                except Exception as e:
+                    logger.warning("gemini_interactions_fallback", error=str(e))
+            
+            # Utiliza client.models.generate_content
+            config_kwargs = {}
+            if system_instruction:
+                config_kwargs["system_instruction"] = system_instruction
+            if self.config.temperature:
+                config_kwargs["temperature"] = self.config.temperature
+
+            response = client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config=types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
+            )
+            return response.text
+
+        try:
+            if GENAI_SDK_AVAILABLE:
+                return await asyncio.to_thread(_call_sdk)
+            else:
+                # Fallback REST API via httpx caso o SDK não esteja instalado no ambiente
+                return await self._call_rest_api(prompt, system_instruction)
+        except Exception as e:
+            logger.error("gemini_sdk_error", error=str(e))
+            # Se der erro no modelo gemini-3.5-flash ou no SDK, tenta chamada REST fallback
+            return await self._call_rest_api(prompt, system_instruction)
+
+    async def _call_rest_api(self, prompt: str, system_instruction: Optional[str] = None) -> str:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
 
         contents = []
         if system_instruction:
@@ -66,7 +113,7 @@ class GeminiRateLimitedProvider(ILLMProvider):
             })
             contents.append({
                 "role": "model",
-                "parts": [{"text": "Entendido. Seguirei rigorosamente as instruções do sistema."}]
+                "parts": [{"text": "Entendido."}]
             })
         
         contents.append({
@@ -82,35 +129,27 @@ class GeminiRateLimitedProvider(ILLMProvider):
             }
         }
 
-        # Tenta a chamada no modelo configurado
-        response = await self._make_api_call(self.model, payload)
-        
-        # Se retornar erro 503 ou 404 por nome de modelo inválido, tenta fallback para gemini-1.5-flash
-        if response.status_code in [404, 503] and self.model != "gemini-1.5-flash":
-            logger.warning("gemini_model_fallback_triggered", original_model=self.model, status_code=response.status_code)
-            response = await self._make_api_call("gemini-1.5-flash", payload)
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(url, json=payload)
+            if response.status_code != 200:
+                # Tenta fallback REST com gemini-1.5-flash se gemini-3.5-flash falhar no endpoint REST antigo
+                fallback_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.api_key}"
+                response = await client.post(fallback_url, json=payload)
 
-        if response.status_code != 200:
-            logger.error("gemini_api_error", status_code=response.status_code, response=response.text)
             response.raise_for_status()
-        
-        data = response.json()
-        try:
+            data = response.json()
             candidates = data.get("candidates", [])
             if not candidates:
                 return ""
             parts = candidates[0].get("content", {}).get("parts", [])
             return "".join([part.get("text", "") for part in parts])
-        except Exception as e:
-            logger.error("gemini_parse_error", error=str(e), raw_response=data)
-            raise RuntimeError(f"Erro ao parsear resposta do Gemini: {e}")
 
     async def check_health(self) -> Dict[str, Any]:
         if not self.api_key:
-            return {"status": "unconfigured", "provider": "gemini", "message": "API Key ausente"}
+            return {"status": "unconfigured", "provider": "gemini", "message": "Por favor informe a Gemini API Key"}
         
         try:
-            res = await self.generate_completion("Responda apenas 'OK'", system_instruction="Verificação de saúde")
+            res = await self.generate_completion("Responda 'OK'", system_instruction="Verificação")
             return {
                 "status": "healthy",
                 "provider": "gemini",
