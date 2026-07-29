@@ -4,7 +4,7 @@ import tempfile
 import zipfile
 import subprocess
 import structlog
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, status
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, Dict, Any, List
@@ -14,6 +14,9 @@ from src.domain.models.llm_config import LLMConfig, LLMProviderType
 from src.infrastructure.ai.llm_factory import LLMFactory
 from src.infrastructure.knowledge_base.grc_repository import GRCKnowledgeRepository
 from src.application.use_cases.audit_use_case import AuditComplianceUseCase
+from src.infrastructure.exporters.sarif_exporter import SarifReporter
+from src.infrastructure.exporters.markdown_exporter import MarkdownPRReporter
+from src.infrastructure.exporters.html_exporter import HTMLExecutiveReporter
 
 logger = structlog.get_logger()
 
@@ -23,7 +26,6 @@ app = FastAPI(
     version=__version__,
 )
 
-# Configuração de CORS para permitir acesso irrestrito do Frontend (Railway / Localhost)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -32,7 +34,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Instâncias globais
 grc_repo = GRCKnowledgeRepository()
 audit_use_case = AuditComplianceUseCase(grc_repo)
 
@@ -46,6 +47,11 @@ class GitScanRequest(BaseModel):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "gemma:2b"
     use_ai: bool = True
+
+
+class ReportExportRequest(BaseModel):
+    scan_result: Dict[str, Any]
+    format: str = "html"  # 'html', 'markdown', ou 'sarif'
 
 
 class LLMTestRequest(BaseModel):
@@ -92,7 +98,6 @@ async def scan_upload_zip(
     ollama_model: str = Form("gemma:2b"),
     use_ai: bool = Form(True)
 ):
-    """Recebe um arquivo .zip contendo o código fonte de uma API (C#, Go, Python, Java, JS/TS), descompacta em sandbox e executa a auditoria."""
     if not file.filename.endswith(".zip"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -104,11 +109,9 @@ async def scan_upload_zip(
         extract_path = os.path.join(temp_dir, "extracted")
         os.makedirs(extract_path, exist_ok=True)
 
-        # Salva o arquivo ZIP temporário
         with open(zip_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        # Descompacta o arquivo
         try:
             with zipfile.ZipFile(zip_path, "r") as zip_ref:
                 zip_ref.extractall(extract_path)
@@ -118,7 +121,6 @@ async def scan_upload_zip(
                 detail=f"Não foi possível descompactar o arquivo ZIP: {str(e)}"
             )
 
-        # Configuração da LLM
         resolved_key = api_key or os.getenv("GEMINI_API_KEY")
         llm_config = LLMConfig(
             provider=provider,
@@ -139,10 +141,8 @@ async def scan_upload_zip(
 
 @app.post("/api/v1/scan/git-url", tags=["Audit Scanner"])
 async def scan_git_url(request: GitScanRequest):
-    """Clona um repositório Git público ou privado via URL e executa a auditoria de conformidade GRC."""
     git_url = request.git_url.strip()
     if request.access_token and "github.com" in git_url and "@" not in git_url:
-        # Injeta token de acesso para repositórios privados
         git_url = git_url.replace("https://", f"https://x-access-token:{request.access_token}@")
 
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -188,6 +188,28 @@ async def scan_git_url(request: GitScanRequest):
         )
 
         return result
+
+
+@app.post("/api/v1/report/export", tags=["Report Exporter"])
+async def export_report(request: ReportExportRequest):
+    """Exporta o resultado da auditoria nos formatos: 'html' (Executivo), 'markdown' (PR Bot) ou 'sarif' (GitHub Security)."""
+    fmt = request.format.lower()
+    scan_result = request.scan_result
+
+    if fmt == "html":
+        content = HTMLExecutiveReporter.generate_html(scan_result)
+        return Response(content=content, media_type="text/html")
+    elif fmt in ["markdown", "md"]:
+        content = MarkdownPRReporter.generate_markdown(scan_result)
+        return Response(content=content, media_type="text/markdown")
+    elif fmt == "sarif":
+        content = SarifReporter.generate_sarif(scan_result)
+        return content
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Formato de exportação '{fmt}' não suportado. Use 'html', 'markdown' ou 'sarif'."
+        )
 
 
 @app.post("/api/v1/llm/test", tags=["LLM Provider"])

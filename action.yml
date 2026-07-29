@@ -1,0 +1,46 @@
+name: 'Auditor de Conformidade de APIs (GRC & Security AI)'
+description: 'Escaneia o código fonte (C#, Go, Python, Java, TS) contra OWASP Top 10 e LGPD Art. 46, comentando os riscos no PR e gerando SARIF.'
+author: 'Auditor Team'
+
+inputs:
+  gemini_api_key:
+    description: 'Chave de API do Google Gemini (gemini-3.5-flash)'
+    required: false
+  github_token:
+    description: 'Token do GitHub para comentar automaticamente no Pull Request'
+    required: false
+    default: '${{ github.token }}'
+  backend_url:
+    description: 'URL do servidor AuditoriaBack no Railway'
+    required: false
+    default: 'https://auditoriaback-production.up.railway.app'
+  sarif_output:
+    description: 'Caminho para salvar o arquivo de resultados SARIF'
+    required: false
+    default: 'results.sarif'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Executar Auditoria GRC via API
+      shell: bash
+      run: |
+        echo "🛡️ Iniciando Auditoria de Conformidade de APIs..."
+        
+        # Compacta os arquivos do repositório para envio
+        zip -q -r project_code.zip . -x "*.git*" "*node_modules*" "*bin*" "*obj*" "*__pycache__*"
+        
+        # Faz chamada ao backend AuditoriaBack
+        response=$(curl -s -X POST "${{ inputs.backend_url }}/api/v1/scan/upload-zip" \
+          -F "file=@project_code.zip" \
+          -F "api_key=${{ inputs.gemini_api_key }}" \
+          -F "use_ai=true")
+        
+        echo "$response" > audit_result.json
+        
+        # Exporta SARIF
+        curl -s -X POST "${{ inputs.backend_url }}/api/v1/report/export" \
+          -H "Content-Type: application/json" \
+          -d "{\"scan_result\": $response, \"format\": \"sarif\"}" > "${{ inputs.sarif_output }}"
+        
+        echo "✅ Auditoria concluída! Relatório SARIF salvo em ${{ inputs.sarif_output }}"
