@@ -13,17 +13,23 @@ class HTMLExecutiveReporter:
         ai_summary = summary.get("ai_executive_summary", "")
         now_str = datetime.datetime.now().strftime("%d/%m/%Y às %H:%M")
 
-        findings_html = ""
+        # Converte quebras de linha fora de f-strings (para compatibilidade Python 3.11)
+        ai_summary_html = ai_summary.replace("\n", "<br>") if ai_summary else ""
+
+        findings_html_list = []
         for f in findings:
             sev = f.get("severity", "LOW")
             badge_class = f"badge-{sev.lower()}"
             loc = f.get("location", {})
 
-            grc_html = ""
+            grc_items = []
             for g in f.get("grc_mappings", []):
-                grc_html += f"<li><strong>{g.get('framework')} ({g.get('control_id')}):</strong> {g.get('title')}</li>"
+                grc_items.append(f"<li><strong>{g.get('framework')} ({g.get('control_id')}):</strong> {g.get('title')}</li>")
+            grc_html = "".join(grc_items)
 
-            findings_html += f"""
+            snippet_block = f'<pre class="code-snippet"><code>{loc.get("snippet")}</code></pre>' if loc.get("snippet") else ''
+
+            findings_html_list.append(f"""
             <div class="card finding-card severity-{sev.lower()}">
                 <div class="finding-header">
                     <div>
@@ -34,16 +40,28 @@ class HTMLExecutiveReporter:
                     <div class="location-tag">{loc.get('file_path')}:{loc.get('line_start')}</div>
                 </div>
                 <p class="description">{f.get('description')}</p>
-                {f'<pre class="code-snippet"><code>{loc.get("snippet")}</code></pre>' if loc.get("snippet") else ''}
+                {snippet_block}
                 <div class="grc-box">
                     <div class="grc-title">CONTROLES GRC AFETADOS:</div>
                     <ul>{grc_html}</ul>
                     <div class="recommendation"><strong>Recomendação:</strong> {f.get('recommendation')}</div>
                 </div>
             </div>
-            """
+            """)
 
-        html_template = f"""<!DOCTYPE html>
+        findings_html = "".join(findings_html_list)
+        ai_box_html = f"<div class='ai-box'><h3>🤖 Parecer Executivo da IA (gemini-3.5-flash)</h3><div>{ai_summary_html}</div></div>" if ai_summary_html else ""
+
+        critical_count = sev_counts.get('CRITICAL', 0)
+        high_count = sev_counts.get('HIGH', 0)
+        files_count = summary.get('total_files_scanned', 0)
+        endpoints_count = summary.get('graph_summary', {}).get('endpoints_count', 0)
+        findings_count = len(findings)
+
+        no_findings_msg = "<p style='color:#94a3b8;'>Nenhum risco de segurança encontrado no repositório.</p>"
+        findings_content = findings_html if findings else no_findings_msg
+
+        return f"""<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
@@ -87,27 +105,27 @@ class HTMLExecutiveReporter:
 
         <div class="metrics">
             <div class="metric-card">
-                <div class="value" style="color: #f43f5e;">{sev_counts.get('CRITICAL', 0)}</div>
+                <div class="value" style="color: #f43f5e;">{critical_count}</div>
                 <div class="label">Risco Crítico</div>
             </div>
             <div class="metric-card">
-                <div class="value" style="color: #f59e0b;">{sev_counts.get('HIGH', 0)}</div>
+                <div class="value" style="color: #f59e0b;">{high_count}</div>
                 <div class="label">Risco Alto</div>
             </div>
             <div class="metric-card">
-                <div class="value">{summary.get('total_files_scanned', 0)}</div>
+                <div class="value">{files_count}</div>
                 <div class="label">Arquivos Analisados</div>
             </div>
             <div class="metric-card">
-                <div class="value" style="color: #34d399;">{summary.get('graph_summary', {{}}).get('endpoints_count', 0)}</div>
+                <div class="value" style="color: #34d399;">{endpoints_count}</div>
                 <div class="label">Endpoints Mapeados</div>
             </div>
         </div>
 
-        {"<div class='ai-box'><h3>🤖 Parecer Executivo da IA (gemini-3.5-flash)</h3><div>" + ai_summary.replace("\n", "<br>") + "</div></div>" if ai_summary else ""}
+        {ai_box_html}
 
-        <h2>🚨 Achados de Conformidade Mapeados ({len(findings)})</h2>
-        {findings_html if findings else "<p style='color:#94a3b8;'>Nenhum risco de segurança encontrado no repositório.</p>"}
+        <h2>🚨 Achados de Conformidade Mapeados ({findings_count})</h2>
+        {findings_content}
 
         <div class="footer">
             Auditor de Conformidade de APIs • OWASP Top 10 • LGPD Art. 46 • ISO 27001
@@ -115,4 +133,3 @@ class HTMLExecutiveReporter:
     </div>
 </body>
 </html>"""
-        return html_template
