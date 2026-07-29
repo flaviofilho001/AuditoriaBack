@@ -12,13 +12,13 @@ logger = structlog.get_logger()
 class GeminiRateLimitedProvider(ILLMProvider):
     """
     Provedor Google Gemini com Rate Limiting Estrito (Máximo 14 requisições por minuto).
-    Mapeia a janela de 60 segundos e faz throttling automático com asyncio.sleep caso exceda 14 RPM.
+    Força o uso exclusivo do modelo 'gemini-3.5-flash'.
     """
 
     def __init__(self, config: LLMConfig):
         self.config = config
         self.api_key = config.api_key
-        self.model = config.gemini_model or "gemini-1.5-flash"
+        self.model = "gemini-3.5-flash"  # Exclusivo gemini-3.5-flash
         self.max_rpm = min(config.max_requests_per_minute, 14)  # Força máximo de 14 RPM
         self._request_timestamps: List[float] = []
         self._lock = asyncio.Lock()

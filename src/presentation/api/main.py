@@ -34,7 +34,7 @@ grc_repo = GRCKnowledgeRepository()
 class LLMTestRequest(BaseModel):
     provider: LLMProviderType = LLMProviderType.GEMINI
     api_key: Optional[str] = None
-    gemini_model: str = "gemini-1.5-flash"
+    gemini_model: str = "gemini-3.5-flash"  # Exclusivo gemini-3.5-flash
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "gemma:2b"
     prompt: str = "Resuma a importância do Artigo 46 da LGPD em 2 frases."
@@ -72,13 +72,13 @@ async def get_grc_doc(doc_name: str):
 
 @app.post("/api/v1/llm/test", tags=["LLM Provider"])
 async def test_llm_provider(request: LLMTestRequest):
-    """Testa a conexão e resposta do provedor de LLM (Gemini com Rate Limiter de 14 RPM ou Ollama Local)."""
+    """Testa a conexão e resposta do provedor de LLM (Gemini gemini-3.5-flash com Rate Limiter de 14 RPM ou Ollama Local)."""
     api_key = request.api_key or os.getenv("GEMINI_API_KEY")
     
     config = LLMConfig(
         provider=request.provider,
         api_key=api_key,
-        gemini_model=request.gemini_model,
+        gemini_model="gemini-3.5-flash",
         ollama_base_url=request.ollama_base_url,
         ollama_model=request.ollama_model
     )
@@ -115,5 +115,5 @@ async def test_llm_provider(request: LLMTestRequest):
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv("PORT", 8000))
+    port = int(os.getenv("PORT", 8080))
     uvicorn.run("src.presentation.api.main:app", host="0.0.0.0", port=port, reload=True)
