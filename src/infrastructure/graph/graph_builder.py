@@ -80,5 +80,21 @@ class NetworkXGraphBuilder:
         """Exporta o grafo construído para o formato XML GraphML (compatível com visualizadores GraphRAG)."""
         if self.graph.number_of_nodes() == 0:
             return ""
+            
+        # O GraphML não suporta valores None, precisamos higienizar os atributos dos nós e arestas
+        for _, data in self.graph.nodes(data=True):
+            for k, v in list(data.items()):
+                if v is None:
+                    data[k] = ""
+                elif isinstance(v, (list, dict)):
+                    data[k] = str(v)
+                    
+        for _, _, data in self.graph.edges(data=True):
+            for k, v in list(data.items()):
+                if v is None:
+                    data[k] = ""
+                elif isinstance(v, (list, dict)):
+                    data[k] = str(v)
+                    
         return "\n".join(nx.generate_graphml(self.graph))
 
