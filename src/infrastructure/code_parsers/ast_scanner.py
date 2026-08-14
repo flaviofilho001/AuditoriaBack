@@ -122,6 +122,30 @@ class ASTCodeScanner:
                         detected_by="ASTCodeScanner"
                     ))
 
+    def _is_public_route_endpoint(self, file_path: str, line_idx: int, lines: List[str]) -> bool:
+        """Verifica se o endpoint é por natureza ou anotação ([AllowAnonymous]) uma rota pública legítima."""
+        start_idx = max(0, line_idx - 6)
+        end_idx = min(len(lines), line_idx + 6)
+        surrounding = "\n".join(lines[start_idx:end_idx]).lower()
+
+        # 1. Atributos explícitos de isenção de autorização
+        if any(attr in surrounding for attr in [
+            "[allowanonymous]", "@allowanonymous", "@public", "@permitall", 
+            "allowanonymous", "ispublic", "allowany"
+        ]):
+            return True
+
+        # 2. Palavras-chave de rotas de autenticação/registro públicas
+        if any(kw in surrounding for kw in ["login", "register", "signup", "signin", "forgotpassword", "resetpassword", "healthz", "swagger"]):
+            return True
+
+        # 3. Controllers conhecidos de Conta/Autenticação tratam rotas públicas de login/registro
+        if any(kw in file_path.lower() for kw in ["auth", "account", "login", "register", "health"]):
+            if any(kw in surrounding for kw in ["login", "register", "signup", "signin", "authenticate"]):
+                return True
+
+        return False
+
     def _scan_source_code(
         self, file_path: str, ext: str, lines: List[str], 
         file_node_id: str, findings: List[VulnerabilityFinding], 
@@ -161,6 +185,7 @@ class ASTCodeScanner:
                     http_method = line_str
 
             if is_endpoint:
+                is_public = self._is_public_route_endpoint(file_path, idx, lines)
                 endpoint_node_id = f"endpoint::{file_path}::{idx}"
                 nodes.append(GraphNode(
                     id=endpoint_node_id,
@@ -168,7 +193,7 @@ class ASTCodeScanner:
                     kind=NodeKind.ENDPOINT,
                     file_path=file_path,
                     line_number=idx,
-                    properties={"has_auth": has_auth_middleware}
+                    properties={"has_auth": has_auth_middleware, "is_public": is_public}
                 ))
                 edges.append(GraphEdge(
                     source_id=file_node_id,
@@ -176,8 +201,8 @@ class ASTCodeScanner:
                     kind=EdgeKind.EXPOSES_ROUTE
                 ))
 
-                # Se for um endpoint e não tiver auth no arquivo/linha -> Alerta de Broken Access Control
-                if not has_auth_middleware and ("login" not in file_path.lower() and "health" not in file_path.lower()):
+                # Se for um endpoint e não tiver auth no arquivo/linha nem for rota pública legítima -> Alerta
+                if not has_auth_middleware and not is_public:
                     findings.append(VulnerabilityFinding(
                         id=f"AUTH-{len(findings)+1:03d}",
                         rule_id="OWASP-A01-NO-AUTH",

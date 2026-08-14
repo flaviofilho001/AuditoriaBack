@@ -85,7 +85,7 @@ class AuditComplianceUseCase:
             for f in findings[:8]  # Limita aos 8 principais para economizar tokens
         ])
 
-        grc_context = self.grc_repo.get_relevant_context(["lgpd", "owasp", "autorizacao", "segredo"])
+        grc_context = self.grc_repo.get_relevant_context(["lgpd", "owasp", "autorizacao", "segredo", "excecoes", "publica"])
 
         prompt = f"""
 Você é um Auditor Sênior de Conformidade GRC e Segurança de APIs.
@@ -97,15 +97,20 @@ ACHADOS ENCONTRADOS:
 RESUMO DO GRAFO DE CÓDIGO:
 Total de nós: {graph_summary.total_nodes}, Endpoints: {graph_summary.endpoints_count}
 
-CONTEXTO DE NORMAS GRC:
-{grc_context[:1000]}
+CONTEXTO DE NORMAS GRC E EXCEÇÕES:
+{grc_context[:1200]}
+
+DIRETRIZES DE SANIDADE E VALIDAÇÃO DE ROTAS PÚBLICAS:
+- Valide se os achados referem-se a rotas públicas legítimas de entrada (como Login, Cadastro/Register, Recuperação de Senha ou Healthcheck).
+- Se a rota for de Login ou Cadastro, reconheça que a ausência de autorização [Authorize] prévia é necessária e esperada para permitir o acesso do visitante.
+- Jamais afirme que formulários de Login/Cadastro em si permitem "alteração não autorizada de perfis de terceiros" ou "extração de dados de terceiros" a menos que o código exponha explicitamente dados confidenciais de outros usuários.
 
 TAREFA:
 Elabore um Resumo Executivo em 3 parágrafos concisos em português:
 1. Avaliação geral do nível de risco da aplicação em relação a OWASP Top 10 e LGPD Art. 46.
-2. Os 2 pontos mais críticos a serem corrigidos imediatamente.
+2. Os 2 pontos mais críticos a serem corrigidos imediatamente (focando em vulnerabilidades reais).
 3. Recomendação final de remediação para o time de desenvolvimento.
 """
-        system_instruction = "Você é um auditor rigoroso de conformidade GRC. Responda em português claro e objetivo."
+        system_instruction = "Você é um auditor rigoroso e tecnicamente preciso de conformidade GRC. Valide o contexto de rotas públicas e responda em português claro e objetivo."
         
         return await provider_inst.generate_completion(prompt, system_instruction=system_instruction)
